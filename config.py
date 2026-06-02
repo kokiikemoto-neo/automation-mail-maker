@@ -44,10 +44,10 @@ GLYPH_Y = 1.12
 HEAD_STEP_RATIO = 0.5
 
 # ── 手書きゆらぎ（mm・skeleton2gcode 用）──
-JIT_POS_MM   = 0.25
+JIT_POS_MM   = 0.10   # 文字位置のゆらぎ（控えめ＝綺麗）
 JIT_HEAD_MM  = 2.5
-JIT_ADV_MM   = 0.2
-BIG_JIT_PROB = 0.12
+JIT_ADV_MM   = 0.10   # 送りのゆらぎ（控えめ）
+BIG_JIT_PROB = 0.0    # たまの大きなずれは無効（崩しすぎ防止）
 BIG_JIT_MULT = 3.0
 
 # ── 線画(skeleton)の内部パラメータ ──
