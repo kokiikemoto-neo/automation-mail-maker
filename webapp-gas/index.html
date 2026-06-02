@@ -38,12 +38,15 @@
     .spin { display:inline-block; width:14px; height:14px; border:2px solid #fff; border-top-color:transparent;
             border-radius:50%; animation: sp .7s linear infinite; vertical-align:-2px; margin-right:6px; }
     @keyframes sp { to { transform: rotate(360deg); } }
+    .tabs { display:flex; gap:8px; margin:14px 0 10px; }
+    .tab { flex:1; background:#f1f5f9; color:#475569; border:1px solid var(--line); border-radius:8px; padding:9px; font-weight:600; font-size:13px; cursor:pointer; }
+    .tab.active { background:var(--blue); color:#fff; border-color:var(--blue); }
   </style>
 </head>
 <body>
   <div class="wrap">
     <h1>✍️ 便箋作成ツール</h1>
-    <div class="sub">会社を選び、文面を作って「便箋作成」を押すと、ロボットPCの順番待ちに入ります。</div>
+    <div class="sub">議事録（ファイル）から原稿を作り、「便箋作成」を押すと、ロボットPCの順番待ちに入ります。</div>
 
     <div class="card">
       <div class="row">
@@ -61,12 +64,18 @@
       <label>宛名（氏名。会社単独なら空欄でOK）</label>
       <input id="recipient" placeholder="例：採用ご担当者 / 山田太郎">
 
-      <label>補足（この会社について分かっていること・任意）</label>
-      <input id="hint" placeholder="例：飲食チェーンを多店舗展開、求人を強化中">
+      <label>議事録ファイルをPCから添付</label>
+      <input type="file" id="minutesFile"
+             accept=".txt,.md,.csv,.pdf,.png,.jpg,.jpeg,.webp,.gif,.mp3,.wav,.m4a,.aac,.ogg,.flac,.mp4,.mov,.webm,.m4v,.mpeg"
+             onchange="onFilePicked()">
+      <div class="count" id="fileInfo"></div>
+
+      <label>または Google ドライブから取り込み（共有URL か ファイルID）</label>
+      <input id="driveRef" placeholder="例：https://drive.google.com/file/d/xxxx/view">
 
       <div class="actions">
-        <button class="btn-blue" id="gen" onclick="onGenerate()">文面を生成</button>
-        <span class="count" id="genHint">Claude が下書きを作ります</span>
+        <button class="btn-blue" id="genMin" onclick="onGenerateFromMinutes()">原稿を生成</button>
+        <span class="count">議事録（テキスト/PDF/画像/音声/動画）と過去の経緯から手書き原稿を作ります</span>
       </div>
     </div>
 
@@ -91,6 +100,21 @@
         <tbody id="orders"><tr><td colspan="4" class="count">読み込み中…</td></tr></tbody>
       </table>
     </div>
+
+    <div class="card">
+      <div style="display:flex; justify-content:space-between; align-items:center">
+        <strong style="font-size:14px">🤖 ロボット操作</strong>
+        <span class="count" id="robotState">状態：—</span>
+      </div>
+      <div class="actions" style="margin-top:12px; flex-wrap:wrap">
+        <button class="btn-ghost" onclick="robotControl('一時停止')">一時停止</button>
+        <button class="btn-ghost" onclick="robotControl('再開')">再開</button>
+        <button class="btn-ghost" style="color:#b91c1c; border-color:#fecaca" onclick="robotControl('中止')">いまの1通を中止</button>
+      </div>
+      <div class="count" style="margin-top:8px">
+        一時停止＝今の動きを止める／再開＝続きから/ 中止＝今書いている1通をやめて次へ進む
+      </div>
+    </div>
   </div>
 
 <script>
@@ -105,26 +129,74 @@
     el.textContent = text;
   }
 
-  function onGenerate() {
-    var company = document.getElementById('company').value.trim();
-    if (!company) { showResult(false, '会社名を入力してください'); return; }
-    var btn = document.getElementById('gen');
+  function onFilePicked() {
+    var f = document.getElementById('minutesFile').files[0];
+    document.getElementById('fileInfo').textContent =
+      f ? ('添付: ' + f.name + '（' + Math.round(f.size / 1024) + ' KB）') : '';
+  }
+
+  function onGenerateFromMinutes() {
+    var fileEl = document.getElementById('minutesFile');
+    var hasFile = fileEl.files && fileEl.files.length > 0;
+    var driveRef = document.getElementById('driveRef').value.trim();
+    if (!hasFile && !driveRef) { showResult(false, '議事録ファイルを添付するか、ドライブのURL/IDを入れてください'); return; }
+
+    var btn = document.getElementById('genMin');
     btn.disabled = true; btn.innerHTML = '<span class="spin"></span>生成中…';
+    function done() { btn.disabled = false; btn.textContent = '原稿を生成'; }
+
+    function callServer(filePayload) {
+      google.script.run
+        .withSuccessHandler(function (r) {
+          done();
+          if (r.ok) { document.getElementById('message').value = r.message; updateCount(); showResult(true, '原稿を生成しました。必要なら編集してください。'); }
+          else { showResult(false, r.error); }
+        })
+        .withFailureHandler(function (e) { done(); showResult(false, '通信エラー: ' + e.message); })
+        .generateDraftFromMinutes({
+          company: document.getElementById('company').value,
+          recipient: document.getElementById('recipient').value,
+          file: filePayload,
+          driveRef: driveRef
+        });
+    }
+
+    if (hasFile) {
+      var f = fileEl.files[0];
+      if (f.size > 18 * 1024 * 1024) { done(); showResult(false, 'ファイルが大きすぎます（18MBまで）。大きい動画はドライブ取り込みでも18MB制限です。短い素材にしてください。'); return; }
+      var reader = new FileReader();
+      reader.onload = function () {
+        var base64 = reader.result.split(',')[1]; // dataURL の "base64," 以降
+        callServer({ name: f.name, mimeType: f.type || 'application/octet-stream', dataBase64: base64 });
+      };
+      reader.onerror = function () { done(); showResult(false, 'ファイルの読み込みに失敗しました'); };
+      reader.readAsDataURL(f);
+    } else {
+      callServer(null);  // ドライブ取り込みのみ
+    }
+  }
+
+  function robotControl(action) {
+    if (action === '中止' && !confirm('いま書いている便箋を中止して次へ進みます。よろしいですか？')) return;
     google.script.run
       .withSuccessHandler(function (r) {
-        btn.disabled = false; btn.textContent = '文面を生成';
-        if (r.ok) { document.getElementById('message').value = r.message; updateCount(); showResult(true, '文面を生成しました。必要なら編集してください。'); }
-        else { showResult(false, r.error); }
+        if (r && r.ok) showResult(true, 'ロボットに「' + action + '」を送りました。');
+        else showResult(false, (r && r.error) || '操作に失敗しました');
+        loadRobotState();
       })
-      .withFailureHandler(function (e) {
-        btn.disabled = false; btn.textContent = '文面を生成';
-        showResult(false, '通信エラー: ' + e.message);
-      })
-      .generateMessage({
-        company: company,
-        recipient: document.getElementById('recipient').value,
-        hint: document.getElementById('hint').value
-      });
+      .withFailureHandler(function (e) { showResult(false, '通信エラー: ' + e.message); })
+      .setControl(action);
+  }
+
+  function loadRobotState() {
+    google.script.run.withSuccessHandler(function (r) {
+      var el = document.getElementById('robotState');
+      if (!r || !r.ok) { el.textContent = '状態：—'; return; }
+      var s = '状態：' + r.status;
+      if (r.current) s += '（' + r.current + '）';
+      if (r.updated) s += ' / ' + r.updated;
+      el.textContent = s;
+    }).getRobotState();
   }
 
   function onCreate() {
@@ -180,6 +252,8 @@
 
   loadOrders();
   loadCompanies();
+  loadRobotState();
+  setInterval(loadRobotState, 5000);
 </script>
 </body>
 </html>

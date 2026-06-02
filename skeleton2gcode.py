@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""
+r"""
 輪郭フォントの単線化（線画）→ Gコード → ロボット手書き
 ------------------------------------------------------------------
 任意の輪郭フォント（夜すがら・白妙など手書き/カジュアル系）の文字を
@@ -31,27 +31,50 @@ except ImportError as e:
     sys.exit(1)
 
 import kanji2gcode as kg
+from config import *   # 設定は config.py に集約（EM_PX, GLYPH_*, JIT_* など）
 
-EM_PX     = 256     # 文字をラスタライズする解像度（高いほど精細・重い）
-THRESHOLD = 100     # 二値化のしきい値（0-255）
-MIN_EDGE_PX = 4     # これより短い骨格の枝（ヒゲ）は捨てる
-SAMPLE_PX = 3       # 骨格の点を何pxごとに拾うか（間引き＝なめらか＆軽量）
 
-# 手書きらしい不揃い（mm単位）。機械的な整列を崩す。
-JIT_POS_MM   = 0.25   # 文字ごとの位置ずれ
-JIT_HEAD_MM  = 2.5    # 改行後の行頭/列頭ずらし
-JIT_ADV_MM   = 0.2    # 文字送りの変動
-BIG_JIT_PROB = 0.12   # たまに大きくずれる確率（手書き感）
-BIG_JIT_MULT = 3.0    # その時の倍率
-
-# 字形の縦横比（1.0=そのまま）。少し縦長にする。
-GLYPH_X = 0.90   # 横方向の倍率（細く）
-GLYPH_Y = 1.12   # 縦方向の倍率（長く）
+def optimize_strokes(strokes, gap=1.2):
+    """線画はペン上下が多くて遅い。近接する線を連結し、最近傍順に並べ替えて
+    ペン上下回数と空走距離を減らす（＝高速化）。完成形の見た目は変わらない。
+    gap(mm) 以内の端点同士はペンを上げずに繋ぐ。"""
+    if len(strokes) <= 1:
+        return strokes
+    g2 = gap * gap
+    remaining = [list(s) for s in strokes]
+    cur = remaining.pop(0)
+    out = []
+    while remaining:
+        cx, cy = cur[-1]
+        best_i, best_d2, best_rev = 0, None, False
+        for i, st in enumerate(remaining):
+            sx, sy = st[0]
+            ex, ey = st[-1]
+            ds = (sx - cx) ** 2 + (sy - cy) ** 2
+            de = (ex - cx) ** 2 + (ey - cy) ** 2
+            if best_d2 is None or ds < best_d2:
+                best_i, best_d2, best_rev = i, ds, False
+            if de < best_d2:
+                best_i, best_d2, best_rev = i, de, True
+        nxt = remaining.pop(best_i)
+        if best_rev:
+            nxt = nxt[::-1]
+        if best_d2 <= g2:
+            cur = cur + nxt          # 近い→ペンを上げず連結
+        else:
+            out.append(cur)          # 遠い→いったんペンを上げて移動
+            cur = nxt
+    out.append(cur)
+    return out
 
 
 def is_kana(ch):
     """ひらがな判定（カタカナは含めない）。"""
     return 0x3040 <= ord(ch) <= 0x309F
+
+
+# 縦書きのとき90度回して「縦に引く」文字（長音・ダッシュ・波ダッシュ類）
+ROTATE_VERTICAL = ('ー', 'ｰ', '－', '—', '―', '‐', '〜', '～')
 
 
 def fib_mod3_seq(n):
@@ -78,8 +101,8 @@ def text_to_strokes(text, kanji_h, fontpath, dry_origin=None, vertical=False, ka
     missing = []
     line_h = kanji_h * 1.5      # 横書きの行送り(mm)
     col_pitch = kanji_h * 1.55  # 縦書きの列送り(mm)
-    fib_seq = fib_mod3_seq(512)     # 行頭/列頭の段差パターン
-    head_step = kanji_h * 0.5       # 段差1単位＝半角分の大きさ(mm)
+    fib_seq = fib_mod3_seq(512)         # 行頭/列頭の段差パターン
+    head_step = kanji_h * HEAD_STEP_RATIO   # 段差1単位の大きさ(mm)
 
     pen = 0.0    # 横書き：文字送り(mm)
     line = 0     # 横書き：行番号
@@ -123,6 +146,7 @@ def text_to_strokes(text, kanji_h, fontpath, dry_origin=None, vertical=False, ka
             else:
                 pen += ch_h * 0.6
             continue
+        rot_v = vertical and (ch in ROTATE_VERTICAL)   # 長音などは縦書きで縦に回す
         cdx, cdy = jit(), jit()
         face.load_char(ch, freetype.FT_LOAD_RENDER)
         adv = face.glyph.advance.x / 64.0
@@ -149,7 +173,11 @@ def text_to_strokes(text, kanji_h, fontpath, dry_origin=None, vertical=False, ka
                         pts = []
                         for i in idxs:
                             r, c = ps[i]
-                            if vertical:
+                            if rot_v:
+                                # 縦書きの長音など：90度回転して縦線にする
+                                x = cx + (rows / 2.0 - r) * scale * GLYPH_X + cdx
+                                y = cy + (c - width / 2.0) * scale * GLYPH_Y + cdy
+                            elif vertical:
                                 x = cx + (c - width / 2.0) * scale * GLYPH_X + cdx
                                 y = cy + (rows / 2.0 - r) * scale * GLYPH_Y + cdy
                             else:
@@ -174,7 +202,9 @@ def text_to_strokes(text, kanji_h, fontpath, dry_origin=None, vertical=False, ka
     def conv(p):
         return (ox + (p[0] - min_x), oy + (p[1] - min_y))   # 既に mm
 
-    return [[conv(p) for p in st] for st in raw], missing
+    converted = [[conv(p) for p in st] for st in raw]
+    converted = optimize_strokes(converted, gap=1.0)   # 文字内の近接線だけ連結（文字間は繋がない＝続け字を防ぐ）
+    return converted, missing
 
 
 def main():

@@ -36,35 +36,9 @@ except ImportError:
     sys.exit(1)
 
 # ─────────────────────────────────────────────
-# 設定
+# 設定（すべて config.py に集約。本番運用は config.py を編集する）
 # ─────────────────────────────────────────────
-SERIAL_PORT = 'COM3'
-BAUD_RATE   = 115200
-
-PEN_DOWN_Z = 10.0
-PEN_UP_Z   = 7.0    # 移動時のペン上げ位置。10で着く→7.0で約3mm浮く（擦らない最適値）
-PEN_FEED   = 10000  # ペン上下速度（Z軸最大15000まで余裕あり）
-FEED       = 6000   # 描画速度（XY最大15000）。速度優先で引き上げ
-
-ORIGIN_X = 20
-ORIGIN_Y = 20
-X_MAX = 190        # 紙サイズ上限（--paper で変更）
-Y_MAX = 230
-
-DEFAULT_HEIGHT = 5.0    # 宛名の標準文字高さ（実機検証で 5mm がちょうど良いと確定）
-
-KANJIVG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fonts', 'kanjivg')
-KVG_EM      = 109.0    # KanjiVG の字面枠（109x109）
-ADVANCE     = 109.0    # 1文字の送り幅（字間込みは下の係数で調整）
-CHAR_GAP    = 1.10     # 文字送りの倍率（1.0でぴったり、>1で字間を空ける）
-SAMPLE_STEP = 4.0      # 筆画を何 KanjiVG単位ごとに点を打つか（小さいほどなめらか）
-
-# 手書き風ゆらぎ（単位は KanjiVG座標＝109が1文字分）。達筆すぎを和らげる。
-HUMANIZE    = True     # 既定で手書き風ゆらぎを有効（--plain で無効化）
-JIT_ROT_DEG = 1.0      # 文字ごとの傾きの揺れ（度）※プリセット1=ごく控えめで確定
-JIT_SCALE   = 0.02     # 文字ごとの大きさの揺れ（±の割合）
-JIT_POS     = 2.0      # 文字ごとの位置の揺れ
-JIT_PT      = 0.0      # 線（各点）の震えは無し＝線はしっかり保つ
+from config import *
 
 
 # ─────────────────────────────────────────────
@@ -90,12 +64,12 @@ def send(ser, cmd, retries=2):
 
 def pen_up(ser):
     send(ser, f'G1 Z{PEN_UP_Z:.2f} F{PEN_FEED}')
-    send(ser, 'G4 P0.03')
+    send(ser, f'G4 P{DWELL}')
 
 
 def pen_down(ser):
     send(ser, f'G1 Z{PEN_DOWN_Z:.2f} F{PEN_FEED}')
-    send(ser, 'G4 P0.03')
+    send(ser, f'G4 P{DWELL}')
 
 
 def move_to(ser, x, y):
@@ -225,8 +199,8 @@ def draw_strokes(ser, strokes):
 #   batch_write.py の USE_STREAMING / --stream で切替（既定は旧方式）。
 # ─────────────────────────────────────────────
 RX_BUFFER_SIZE    = 128     # GRBL 受信バッファ（character-counting の上限）
-STREAM_DWELL_UP   = 0.05    # ペン上げ後の待ち秒（実機検証で渡り線が消えた確定値）
-STREAM_DWELL_DOWN = 0.03    # ペン下げ後の待ち秒（確定値）
+STREAM_DWELL_UP   = 0.03    # ペン上げ後の待ち秒（速度優先で短縮）
+STREAM_DWELL_DOWN = 0.02    # ペン下げ後の待ち秒（速度優先で短縮）
 
 
 def _stream_drain(ser, c_line, where):
@@ -249,13 +223,9 @@ def _stream_drain(ser, c_line, where):
         # 情報行 '[...]' '<...>' は無視
 
 
-def draw_strokes_streamed(ser, strokes,
-                          dwell_up=STREAM_DWELL_UP, dwell_down=STREAM_DWELL_DOWN):
-    """draw_strokes と同じ筆順・命令で書くが、character-counting で連続送信する。
-    1点ごとの ok 待ちをやめ、GRBL の先読みでまとめて流す（高速・滑らか）。
-    安全策：error: 検出で即中断／終端フラッシュで全 ok 回収／応答途絶ガード。
-    ペン上下後は G4 dwell でペンが物理的に動ききるのを待つ（渡り線対策）。"""
-    # 送る命令列を組み立て（draw_strokes と同一の流れ。dwell だけ可変）
+def _strokes_to_prog(strokes, origin_return=True,
+                     dwell_up=STREAM_DWELL_UP, dwell_down=STREAM_DWELL_DOWN):
+    """strokes を GRBL 命令列(prog)に変換する（draw_strokes と同一の筆順・命令）。"""
     prog = ['G21', 'G90',
             f'G1 Z{PEN_UP_Z:.2f} F{PEN_FEED}', f'G4 P{dwell_up:.3f}']   # 初期ペン上げ
     for st in strokes:
@@ -267,32 +237,44 @@ def draw_strokes_streamed(ser, strokes,
             prog.append(f'G1 X{x:.2f} Y{y:.2f} F{FEED}')       # line_to
         prog.append(f'G1 Z{PEN_UP_Z:.2f} F{PEN_FEED}')         # pen_up
         prog.append(f'G4 P{dwell_up:.3f}')                     # 上げ切り待ち（渡り線対策）
-    prog.append(f'G0 X{ORIGIN_X:.2f} Y{ORIGIN_Y:.2f}')         # 原点へ戻る
+    if origin_return:
+        prog.append(f'G0 X{ORIGIN_X:.2f} Y{ORIGIN_Y:.2f}')     # 原点へ戻る
+    return prog
 
-    # character-counting ストリーミング
+
+def _stream_lines(ser, prog, where='stream'):
+    """命令列(prog)を character-counting で連続送信する。
+    1行ごとの ok 待ち（往復遅延）をやめ、GRBL の先読みでまとめて流す＝高速。
+    error: 検出で即中断／終端フラッシュで全 ok 回収／応答途絶ガード。"""
     c_line = []
     ser.reset_input_buffer()
     empty = 0
     for i, line in enumerate(prog):
         c_line.append(len(line) + 1)   # +1 は改行ぶん
-        # 受信バッファに空きが要る、または応答が来ている間は回収
         while sum(c_line) >= RX_BUFFER_SIZE - 1 or ser.in_waiting:
             resp = ser.readline().decode(errors='ignore').strip()
             if resp == '':
                 empty += 1
                 if empty > 3:
-                    raise RuntimeError(f'GRBL 応答が途絶（送信中・行{i}）')
+                    raise RuntimeError(f'GRBL 応答が途絶（{where}・行{i}）')
                 continue
             empty = 0
             if resp == 'ok':
                 c_line.pop(0)
             elif resp.startswith('error'):
                 c_line.pop(0)
-                # エラーを握りつぶさず即中断
                 raise RuntimeError(f'GRBL {resp} 付近 行{i}: {line!r}')
             # 情報行 '[...]' '<...>' は無視
         ser.write((line + '\n').encode())
-    _stream_drain(ser, c_line, 'flush')   # 終端フラッシュ（未回収の ok を全部待つ）
+    _stream_drain(ser, c_line, where)   # 終端フラッシュ（未回収の ok を全部待つ）
+
+
+def draw_strokes_streamed(ser, strokes,
+                          dwell_up=STREAM_DWELL_UP, dwell_down=STREAM_DWELL_DOWN):
+    """draw_strokes と同じ筆順で書くが、character-counting で連続送信する（高速・滑らか）。"""
+    prog = _strokes_to_prog(strokes, origin_return=True,
+                            dwell_up=dwell_up, dwell_down=dwell_down)
+    _stream_lines(ser, prog, 'stream')
 
 
 def draw_frame(ser, strokes):
@@ -319,37 +301,30 @@ def open_serial():
     return s
 
 
-def draw_chunked(strokes, chunk=40):
-    """ストロークを小分けにし、チャンクごとに接続し直して書く。
-    USB が途中で切れても、そのチャンクを再接続してやり直すだけで済む（座標は保持）。"""
+def draw_chunked(strokes, chunk=60):
+    """ストロークを小分けにし、各チャンクを接続し直して『ストリーミング送信』する。
+    高速（character-counting）＋ USB が切れてもそのチャンクを再接続してやり直すだけ（座標は保持）。"""
     i = 0
     n = len(strokes)
     while i < n:
         sub = strokes[i:i + chunk]
+        last = (i + chunk) >= n
+        prog = _strokes_to_prog(sub, origin_return=last)   # 最後のチャンクだけ原点へ戻る
         for attempt in range(6):
             ser = None
             try:
                 ser = open_serial()
                 time.sleep(0.3)
-                ser.reset_input_buffer()
-                send(ser, 'G21')
-                send(ser, 'G90')
-                pen_up(ser)
-                for st in sub:
-                    move_to(ser, *st[0])
-                    pen_down(ser)
-                    for x, y in st[1:]:
-                        line_to(ser, x, y)
-                    pen_up(ser)
+                _stream_lines(ser, prog, f'chunk@{i}')   # 高速ストリーミング
                 ser.close()
                 break
-            except serial.SerialException:
+            except (serial.SerialException, RuntimeError):
                 if ser is not None:
                     try:
                         ser.close()
                     except Exception:
                         pass
-                if attempt == 3:
+                if attempt == 5:
                     raise
                 time.sleep(2)   # USB 復帰を待って再接続
         print(f'  {min(i + chunk, n)}/{n} 本')
@@ -417,20 +392,20 @@ def main():
         print("--dry なので実機は動かしません。範囲チェックのみ。")
         return
 
-    ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=5)
-    time.sleep(2)
-    ser.reset_input_buffer()
-    try:
-        if frame:
+    if frame:
+        ser = open_serial()
+        time.sleep(0.3)
+        ser.reset_input_buffer()
+        try:
             print("--frame: 枠をなぞります（書きません）。位置を確認してください。")
             draw_frame(ser, strokes)
-        else:
-            print("書き始めます...")
-            draw_strokes(ser, strokes)
-            print("=== 書き出し完了 ===")
-            print("紙を確認してください。")
-    finally:
-        ser.close()
+        finally:
+            ser.close()
+    else:
+        print("書き始めます（高速ストリーミング・分割送信）...")
+        draw_chunked(strokes)
+        print("=== 書き出し完了 ===")
+        print("紙を確認してください。")
 
 
 if __name__ == '__main__':
