@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <base target="_top">
+  <meta charset="utf-8">
+  <style>
+    :root { --blue:#2563eb; --green:#16a34a; --gray:#6b7280; --line:#e5e7eb; }
+    * { box-sizing: border-box; }
+    body { font-family: -apple-system, "Segoe UI", "Hiragino Kaku Gothic ProN", Meiryo, sans-serif;
+           margin: 0; background: #f6f7f9; color: #1f2937; }
+    .wrap { max-width: 720px; margin: 0 auto; padding: 20px 16px 60px; }
+    h1 { font-size: 20px; margin: 8px 0 4px; }
+    .sub { color: var(--gray); font-size: 13px; margin-bottom: 20px; }
+    .card { background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 18px; margin-bottom: 16px; }
+    label { display: block; font-size: 13px; font-weight: 600; margin: 12px 0 4px; }
+    input, textarea { width: 100%; padding: 10px; border: 1px solid var(--line); border-radius: 8px; font-size: 14px; font-family: inherit; }
+    textarea { min-height: 120px; resize: vertical; line-height: 1.7; }
+    .row { display: flex; gap: 12px; }
+    .row > div { flex: 1; }
+    button { border: 0; border-radius: 8px; padding: 11px 16px; font-size: 14px; font-weight: 600; cursor: pointer; }
+    .btn-blue { background: var(--blue); color: #fff; }
+    .btn-green { background: var(--green); color: #fff; width: 100%; padding: 14px; font-size: 15px; }
+    .btn-ghost { background: #fff; border: 1px solid var(--line); color: #374151; }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    .actions { display: flex; gap: 10px; align-items: center; margin-top: 10px; }
+    .count { font-size: 12px; color: var(--gray); }
+    .msg { font-size: 13px; padding: 8px 10px; border-radius: 8px; margin-top: 10px; display: none; }
+    .msg.ok { background: #ecfdf5; color: #065f46; display: block; }
+    .msg.err { background: #fef2f2; color: #991b1b; display: block; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line); }
+    th { color: var(--gray); font-weight: 600; }
+    .pill { font-size: 12px; padding: 2px 8px; border-radius: 999px; }
+    .s-待ち { background: #fef9c3; color: #854d0e; }
+    .s-処理中 { background: #dbeafe; color: #1e40af; }
+    .s-完了 { background: #dcfce7; color: #166534; }
+    .s-エラー { background: #fee2e2; color: #991b1b; }
+    .spin { display:inline-block; width:14px; height:14px; border:2px solid #fff; border-top-color:transparent;
+            border-radius:50%; animation: sp .7s linear infinite; vertical-align:-2px; margin-right:6px; }
+    @keyframes sp { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>✍️ 便箋作成ツール</h1>
+    <div class="sub">会社を選び、文面を作って「便箋作成」を押すと、ロボットPCの順番待ちに入ります。</div>
+
+    <div class="card">
+      <div class="row">
+        <div>
+          <label>担当者</label>
+          <input id="staff" placeholder="例：池本">
+        </div>
+        <div>
+          <label>会社名 <span style="color:#dc2626">*</span></label>
+          <input id="company" list="company-list" placeholder="例：株式会社サンプル">
+          <datalist id="company-list"></datalist>
+        </div>
+      </div>
+
+      <label>宛名（氏名。会社単独なら空欄でOK）</label>
+      <input id="recipient" placeholder="例：採用ご担当者 / 山田太郎">
+
+      <label>補足（この会社について分かっていること・任意）</label>
+      <input id="hint" placeholder="例：飲食チェーンを多店舗展開、求人を強化中">
+
+      <div class="actions">
+        <button class="btn-blue" id="gen" onclick="onGenerate()">文面を生成</button>
+        <span class="count" id="genHint">Claude が下書きを作ります</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <label>文面（手書きする本文・編集できます）</label>
+      <textarea id="message" placeholder="ここに文面が入ります。手で書き直してもOK。" oninput="updateCount()"></textarea>
+      <div class="count" id="charCount">0 文字</div>
+
+      <div style="margin-top:14px">
+        <button class="btn-green" id="create" onclick="onCreate()">便箋作成（順番待ちに入れる）</button>
+      </div>
+      <div class="msg" id="result"></div>
+    </div>
+
+    <div class="card">
+      <div style="display:flex; justify-content:space-between; align-items:center">
+        <strong style="font-size:14px">最近の注文</strong>
+        <button class="btn-ghost" onclick="loadOrders()">更新</button>
+      </div>
+      <table style="margin-top:10px">
+        <thead><tr><th>受付</th><th>会社</th><th>担当</th><th>状況</th></tr></thead>
+        <tbody id="orders"><tr><td colspan="4" class="count">読み込み中…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+<script>
+  function updateCount() {
+    var n = document.getElementById('message').value.length;
+    document.getElementById('charCount').textContent = n + ' 文字';
+  }
+
+  function showResult(ok, text) {
+    var el = document.getElementById('result');
+    el.className = 'msg ' + (ok ? 'ok' : 'err');
+    el.textContent = text;
+  }
+
+  function onGenerate() {
+    var company = document.getElementById('company').value.trim();
+    if (!company) { showResult(false, '会社名を入力してください'); return; }
+    var btn = document.getElementById('gen');
+    btn.disabled = true; btn.innerHTML = '<span class="spin"></span>生成中…';
+    google.script.run
+      .withSuccessHandler(function (r) {
+        btn.disabled = false; btn.textContent = '文面を生成';
+        if (r.ok) { document.getElementById('message').value = r.message; updateCount(); showResult(true, '文面を生成しました。必要なら編集してください。'); }
+        else { showResult(false, r.error); }
+      })
+      .withFailureHandler(function (e) {
+        btn.disabled = false; btn.textContent = '文面を生成';
+        showResult(false, '通信エラー: ' + e.message);
+      })
+      .generateMessage({
+        company: company,
+        recipient: document.getElementById('recipient').value,
+        hint: document.getElementById('hint').value
+      });
+  }
+
+  function onCreate() {
+    var company = document.getElementById('company').value.trim();
+    var message = document.getElementById('message').value.trim();
+    if (!company) { showResult(false, '会社名を入力してください'); return; }
+    if (!message) { showResult(false, '文面が空です'); return; }
+    var btn = document.getElementById('create');
+    btn.disabled = true; btn.innerHTML = '<span class="spin"></span>登録中…';
+    google.script.run
+      .withSuccessHandler(function (r) {
+        btn.disabled = false; btn.textContent = '便箋作成（順番待ちに入れる）';
+        if (r.ok) {
+          showResult(true, '受け付けました（' + r.id + '）。ロボットPCが順番に書き出します。');
+          document.getElementById('message').value = '';
+          updateCount();
+          loadOrders();
+        } else { showResult(false, r.error); }
+      })
+      .withFailureHandler(function (e) {
+        btn.disabled = false; btn.textContent = '便箋作成（順番待ちに入れる）';
+        showResult(false, '通信エラー: ' + e.message);
+      })
+      .createOrder({
+        staff: document.getElementById('staff').value,
+        company: company,
+        recipient: document.getElementById('recipient').value,
+        message: message
+      });
+  }
+
+  function loadOrders() {
+    google.script.run.withSuccessHandler(function (r) {
+      var tb = document.getElementById('orders');
+      if (!r.ok || !r.rows.length) { tb.innerHTML = '<tr><td colspan="4" class="count">まだ注文はありません</td></tr>'; return; }
+      tb.innerHTML = r.rows.map(function (o) {
+        return '<tr><td>' + o.received + '</td><td>' + esc(o.company) + '</td><td>' + esc(o.staff || '') +
+               '</td><td><span class="pill s-' + o.status + '">' + o.status + '</span></td></tr>';
+      }).join('');
+    }).getOrders(15);
+  }
+
+  function loadCompanies() {
+    google.script.run.withSuccessHandler(function (r) {
+      if (!r.ok || !r.companies.length) return;
+      document.getElementById('company-list').innerHTML =
+        r.companies.map(function (c) { return '<option value="' + esc(c) + '">'; }).join('');
+    }).getCompanies();
+  }
+
+  function esc(s) { return ('' + s).replace(/[&<>"]/g, function (c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+
+  loadOrders();
+  loadCompanies();
+</script>
+</body>
+</html>

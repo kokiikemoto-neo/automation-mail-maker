@@ -1,0 +1,5 @@
+# ロボットPC 常駐プログラム（robot_daemon.py）の依存ライブラリ
+gspread>=6.0.0
+google-auth>=2.0.0
+pyserial>=3.5
+svgpathtools>=1.6.1

@@ -1,0 +1,16 @@
+# 機密：サービスアカウントの鍵（絶対に上げない）
+service_account.json
+*.serviceaccount.json
+
+# clasp の認証情報（ローカル）
+.clasprc.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db

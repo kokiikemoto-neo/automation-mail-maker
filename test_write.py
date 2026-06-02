@@ -11,6 +11,10 @@ Writing Robot T-A4 書字品質テスト
   python test_write.py 3   # ステップ3: ひらがな「し」
 
 最初は必ず 1 から。1がきれいに書けたら 2、2が通ったら 3 に進む。
+
+※ ペンの上下は Z軸で制御する（このロボットの実機検証で確定）。
+   Z=10 で紙に着く（ペン下げ）、Z=0 で紙から離れる（ペン上げ）。
+   ※ Z軸の向きは一般と逆（数字が大きいほど下がる）。サーボ(M3/M5)方式ではない。
 """
 
 import sys
@@ -29,9 +33,12 @@ except ImportError:
 SERIAL_PORT = 'COM3'      # デバイスマネージャーで確認した番号
 BAUD_RATE   = 115200
 
-PEN_DOWN = 'M3 S255'      # ペンを下げる（紙に着ける）
-PEN_UP   = 'M3 S0'        # ペンを上げる
-FEED     = 1000           # 描画速度 mm/min（遅いほどきれい・速いほど速い）
+# ペンの上下は Z軸（mm）。Z=0 が紙に着く位置。
+PEN_DOWN_Z = 10.0         # ペンを下げる（紙に着ける）Z値。このロボットは Z=10 で紙に着く（向き逆）
+PEN_UP_Z   = 0.0          # ペンを上げる（紙から離す）Z値。Z=0 が一番上
+PEN_FEED   = 500          # ペン上下の速度 mm/min
+
+FEED       = 1000         # 描画速度 mm/min（遅いほどきれい・速いほど速い）
 
 # 書き始める基準位置（紙の左下あたり。機械の可動域内で安全な値）
 ORIGIN_X = 20
@@ -57,16 +64,19 @@ def setup(ser):
     print("--- 初期化 ---")
     send(ser, 'G21')           # ミリメートル単位
     send(ser, 'G90')           # 絶対座標
-    send(ser, f'G1 F{FEED}')   # 速度設定
-    send(ser, PEN_UP, wait=0.3)
+    pen_up(ser)                # まずペンを上げておく
 
 
 def pen_up(ser):
-    send(ser, PEN_UP, wait=0.3)
+    """ペンを上げる（Z を上の位置へ）"""
+    send(ser, f'G1 Z{PEN_UP_Z:.2f} F{PEN_FEED}')
+    send(ser, 'G4 P0.3')   # Z移動が完全に終わるまで待つ（同期）。これが無いとXY移動と混ざる
 
 
 def pen_down(ser):
-    send(ser, PEN_DOWN, wait=0.3)
+    """ペンを下げる（Z を紙に着く位置へ）"""
+    send(ser, f'G1 Z{PEN_DOWN_Z:.2f} F{PEN_FEED}')
+    send(ser, 'G4 P0.3')   # Z移動が完全に終わるまで待つ（同期）
 
 
 def move_to(ser, x, y):
@@ -76,14 +86,14 @@ def move_to(ser, x, y):
 
 def line_to(ser, x, y):
     """ペンを下げたまま描画"""
-    send(ser, f'G1 X{x:.2f} Y{y:.2f}')
+    send(ser, f'G1 X{x:.2f} Y{y:.2f} F{FEED}')
 
 
 def draw_path(ser, points):
     """点列を1本のストロークとして描く。points = [(x,y), (x,y), ...]"""
     if not points:
         return
-    move_to(ser, *points[0])   # 始点まで移動
+    move_to(ser, *points[0])   # 始点まで移動（ペンは上がっている）
     pen_down(ser)
     for x, y in points[1:]:
         line_to(ser, x, y)
@@ -130,17 +140,23 @@ def step3_hiragana_shi(ser):
     （フォントを使う前の、いちばん簡単な曲線確認）
     """
     ox, oy = ORIGIN_X, ORIGIN_Y
-    # 「し」: 上から下りて、右へカーブして跳ねる動き
-    pts = [
-        (ox + 10, oy + 40),
-        (ox + 10, oy + 18),
-        (ox + 11, oy + 12),
-        (ox + 14, oy + 7),
-        (ox + 19, oy + 4),
-        (ox + 25, oy + 4),
-        (ox + 30, oy + 7),
-        (ox + 32, oy + 12),
-    ]
+    pts = []
+    # ① 縦線（上から下へ）— ここは直線でよい
+    pts.append((ox + 10, oy + 40))
+    pts.append((ox + 10, oy + 18))
+    # ② 底のカーブ（3次ベジェ曲線を多点に分割してなめらかに）
+    #    点を細かく刻むほど折れ線が目立たず、なめらかな曲線に見える
+    p0 = (ox + 10, oy + 18)   # カーブ開始（縦線の下端）
+    p1 = (ox + 10, oy + 3)    # 制御点1（いったん真下へ）
+    p2 = (ox + 22, oy + 3)    # 制御点2（底を右へ）
+    p3 = (ox + 33, oy + 13)   # 終点（右上へ跳ねる）
+    SEGMENTS = 24             # 分割数。増やすほどなめらか
+    for i in range(1, SEGMENTS + 1):
+        t = i / SEGMENTS
+        mt = 1 - t
+        x = mt**3 * p0[0] + 3 * mt**2 * t * p1[0] + 3 * mt * t**2 * p2[0] + t**3 * p3[0]
+        y = mt**3 * p0[1] + 3 * mt**2 * t * p1[1] + 3 * mt * t**2 * p2[1] + t**3 * p3[1]
+        pts.append((x, y))
     draw_path(ser, pts)
     move_to(ser, ox, oy)
 
@@ -166,7 +182,7 @@ def main():
     print(f"=== ステップ{step}: {label} ===")
     print(f"ポート {SERIAL_PORT} / {BAUD_RATE}bps に接続します...")
 
-    ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=3)
+    ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=5)
     time.sleep(2)               # GRBL の起動待ち
     ser.reset_input_buffer()
     print("接続完了\n")
