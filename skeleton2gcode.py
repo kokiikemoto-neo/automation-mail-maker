@@ -68,13 +68,30 @@ def optimize_strokes(strokes, gap=1.2):
     return out
 
 
+def wrap_columns(text, max_chars):
+    """段落（改行区切り）を1列 max_chars 文字で折り返して改行でつなぐ。
+    縦書きでは各行が1列（上→下）になり、紙の高さに収める用。"""
+    out = []
+    for para in text.split('\n'):
+        para = para.rstrip()
+        if not para:
+            continue
+        for i in range(0, len(para), max_chars):
+            out.append(para[i:i + max_chars])
+    return '\n'.join(out)
+
+
 def is_kana(ch):
     """ひらがな判定（カタカナは含めない）。"""
     return 0x3040 <= ord(ch) <= 0x309F
 
 
-# 縦書きのとき90度回して「縦に引く」文字（長音・ダッシュ・波ダッシュ類）
-ROTATE_VERTICAL = ('ー', 'ｰ', '－', '—', '―', '‐', '〜', '～')
+# 縦書きのとき90度回して「縦に引く」文字（長音・ダッシュ・波ダッシュ・鉤括弧類）
+ROTATE_VERTICAL = ('ー', 'ｰ', '－', '—', '―', '‐', '〜', '～',
+                   '「', '」', '『', '』', '（', '）', '(', ')')
+
+# 縦書きで字の右上に小さく置く約物（読点・句点）
+PUNCT_TOPRIGHT = ('、', '。', '，', '．')
 
 
 def fib_mod3_seq(n):
@@ -97,7 +114,7 @@ def text_to_strokes(text, kanji_h, fontpath, dry_origin=None, vertical=False, ka
     if kana_h is None:
         kana_h = kanji_h
 
-    raw = []          # mm座標（y上向き・文字配置済み）
+    char_groups = []  # 文字ごとの線リスト（文字単位で最適化＝文字をまたがない）
     missing = []
     line_h = kanji_h * 1.5      # 横書きの行送り(mm)
     col_pitch = kanji_h * 1.55  # 縦書きの列送り(mm)
@@ -126,7 +143,9 @@ def text_to_strokes(text, kanji_h, fontpath, dry_origin=None, vertical=False, ka
             continue
         # 「お慶び」などの接頭辞の「お」（次が漢字）は漢字サイズ、他のひらがなは小さく
         nxt = text[idx + 1] if idx + 1 < len(text) else ''
-        if ch in ('お', 'ご') and nxt and nxt not in ('\n', '　', ' ') and not is_kana(nxt):
+        if ch in PUNCT_TOPRIGHT:
+            ch_h = kana_h    # 読点・句点は小さめ
+        elif ch in ('お', 'ご') and nxt and nxt not in ('\n', '　', ' ') and not is_kana(nxt):
             ch_h = kanji_h   # 「お慶び」「ご清栄」などの接頭辞は漢字サイズ
         elif is_kana(ch):
             ch_h = kana_h
@@ -146,7 +165,8 @@ def text_to_strokes(text, kanji_h, fontpath, dry_origin=None, vertical=False, ka
             else:
                 pen += ch_h * 0.6
             continue
-        rot_v = vertical and (ch in ROTATE_VERTICAL)   # 長音などは縦書きで縦に回す
+        rot_v = vertical and (ch in ROTATE_VERTICAL)   # 長音・括弧などは縦書きで回す
+        punct_v = vertical and (ch in PUNCT_TOPRIGHT)  # 句読点は縦書きで右上に寄せる
         cdx, cdy = jit(), jit()
         face.load_char(ch, freetype.FT_LOAD_RENDER)
         adv = face.glyph.advance.x / 64.0
@@ -154,6 +174,7 @@ def text_to_strokes(text, kanji_h, fontpath, dry_origin=None, vertical=False, ka
         rows, width = bmp.rows, bmp.width
         bl = face.glyph.bitmap_left
         bt = face.glyph.bitmap_top
+        cur_lines = []   # この1文字ぶんの線（文字ごとにまとめる）
         if rows > 0 and width > 0:
             arr = np.array(bmp.buffer, dtype=np.uint8).reshape(rows, width)
             binary = arr > THRESHOLD
@@ -174,9 +195,13 @@ def text_to_strokes(text, kanji_h, fontpath, dry_origin=None, vertical=False, ka
                         for i in idxs:
                             r, c = ps[i]
                             if rot_v:
-                                # 縦書きの長音など：90度回転して縦線にする
+                                # 縦書きの長音・括弧：90度回転（時計回り）
                                 x = cx + (rows / 2.0 - r) * scale * GLYPH_X + cdx
-                                y = cy + (c - width / 2.0) * scale * GLYPH_Y + cdy
+                                y = cy - (c - width / 2.0) * scale * GLYPH_Y + cdy
+                            elif punct_v:
+                                # 句読点：字の右上に寄せる（縦書きの作法）
+                                x = cx + (c - width / 2.0) * scale * GLYPH_X + col_pitch * 0.28 + cdx
+                                y = cy + (rows / 2.0 - r) * scale * GLYPH_Y + ch_h * 0.30 + cdy
                             elif vertical:
                                 x = cx + (c - width / 2.0) * scale * GLYPH_X + cdx
                                 y = cy + (rows / 2.0 - r) * scale * GLYPH_Y + cdy
@@ -184,16 +209,18 @@ def text_to_strokes(text, kanji_h, fontpath, dry_origin=None, vertical=False, ka
                                 x = pen + (bl + c) * scale * GLYPH_X + cdx
                                 y = -line * line_h + (bt - r) * scale * GLYPH_Y + cdy
                             pts.append((x, y))
-                        raw.append(pts)
+                        cur_lines.append(pts)
+        if cur_lines:
+            char_groups.append(cur_lines)   # 1文字ぶんをまとめて保持
         if vertical:
             ycur -= ch_h * 1.05 + random.uniform(-JIT_ADV_MM, JIT_ADV_MM)
         else:
             pen += adv * scale + random.uniform(-JIT_ADV_MM, JIT_ADV_MM)
 
-    if not raw:
+    if not char_groups:
         return [], missing
 
-    pts_all = [p for st in raw for p in st]
+    pts_all = [p for grp in char_groups for line in grp for p in line]
     min_x = min(p[0] for p in pts_all)
     min_y = min(p[1] for p in pts_all)
     ox = kg.ORIGIN_X if dry_origin is None else dry_origin[0]
@@ -202,9 +229,12 @@ def text_to_strokes(text, kanji_h, fontpath, dry_origin=None, vertical=False, ka
     def conv(p):
         return (ox + (p[0] - min_x), oy + (p[1] - min_y))   # 既に mm
 
-    converted = [[conv(p) for p in st] for st in raw]
-    converted = optimize_strokes(converted, gap=1.0)   # 文字内の近接線だけ連結（文字間は繋がない＝続け字を防ぐ）
-    return converted, missing
+    # 文字ごとに連結最適化（文字をまたがない＝一文字ずつ順番に書く・文字飛ばし防止）
+    result = []
+    for grp in char_groups:
+        conv_grp = [[conv(p) for p in line] for line in grp]
+        result.extend(optimize_strokes(conv_grp, gap=1.0))
+    return result, missing
 
 
 def main():
@@ -226,6 +256,10 @@ def main():
     if '--kana' in argv:
         i = argv.index('--kana')
         kana_h = float(argv[i + 1]); del argv[i:i + 2]
+    wrap_n = None
+    if '--wrap' in argv:
+        i = argv.index('--wrap')
+        wrap_n = int(argv[i + 1]); del argv[i:i + 2]
 
     args = [a for a in argv if a not in ('--dry', '--frame', '--vertical')]
     if not args or not fontpath:
@@ -236,6 +270,8 @@ def main():
 
     text = args[0].replace('\\n', '\n')
     height = float(args[1]) if len(args) > 1 else 10.0
+    if wrap_n:
+        text = wrap_columns(text, wrap_n)   # 長文を1列 wrap_n 文字で折り返す
 
     print(f'用紙 X[0〜{kg.X_MAX}] Y[0〜{kg.Y_MAX}]  漢字{height}mm/かな{kana_h or height}mm  原点({kg.ORIGIN_X},{kg.ORIGIN_Y})  {"縦書き" if vertical else "横書き"}')
     print(f'フォント(単線化): {fontpath}')

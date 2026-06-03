@@ -41,7 +41,7 @@ GLYPH_X = 0.90
 GLYPH_Y = 1.12
 
 # ── 段差（フィボナッチmod3 × 漢字h × この比）──
-HEAD_STEP_RATIO = 0.5
+HEAD_STEP_RATIO = 0.5   # 改行後の列頭の空白＝フィボナッチmod3(0,1,1,2,0,2,2,1,0…)×半角分。累積させない
 
 # ── 手書きゆらぎ（mm・skeleton2gcode 用）──
 JIT_POS_MM   = 0.10   # 文字位置のゆらぎ（控えめ＝綺麗）
